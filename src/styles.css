@@ -112,6 +112,38 @@
     border-radius: var(--radius-md);
     padding: 0.9rem;
   }
+  .text-link {
+    color: var(--color-fg);
+    text-decoration: underline;
+    text-decoration-color: var(--color-primary);
+    text-underline-offset: 0.25rem;
+  }
+  .page-pad {
+    padding-bottom: calc(5.75rem + env(safe-area-inset-bottom));
+  }
+  .dock {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 20;
+    border-top: 1px solid var(--color-line);
+    background: color-mix(in srgb, var(--color-bg) 92%, transparent);
+    padding-bottom: env(safe-area-inset-bottom);
+    backdrop-filter: blur(12px);
+  }
+}
+
+@media (min-width: 40rem) {
+  .page-pad {
+    padding-bottom: 4rem;
+  }
+  .dock {
+    position: static;
+    border-top: 0;
+    background: transparent;
+    padding-bottom: 0;
+    backdrop-filter: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
