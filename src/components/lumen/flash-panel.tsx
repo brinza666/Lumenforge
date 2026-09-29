@@ -21,7 +21,7 @@ export function FlashPanel() {
             <span className="text-fg">Cousin preset.</span> A built-in effect with your speed, intensity, and palette. The lamp plays it alone. It is a relative, not a copy.
           </li>
           <li>
-            <span className="text-fg">Usermod.</span> Twelve original effects compiled into WLED. After one flash they show up as LF Veil, LF Tide, and the rest, and playlists can call them by name.
+            <span className="text-fg">Usermod.</span> The original twelve looks compile into WLED. Newer looks (Drift, Bloom, Orbit, and the rest) stay in the browser and stream live — stock firmware still cannot store a new algorithm over Wi-Fi.
           </li>
           <li>
             <span className="text-fg">ARTI-FX.</span> A small script for MoonModules builds only. Some looks port closely. Particles do not.

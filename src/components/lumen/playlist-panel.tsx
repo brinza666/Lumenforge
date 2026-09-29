@@ -2,8 +2,7 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import { LampError, postState } from "@/lib/wled/client";
 import { downloadText } from "@/lib/wled/download";
-import { toHex } from "@/lib/wled/palettes";
-import { stopsFor } from "@/lib/wled/palettes";
+import { stopsFor, toHex, vivid } from "@/lib/wled/palettes";
 import {
   buildMix,
   planSlots,
@@ -13,6 +12,7 @@ import {
   usedPresetNames,
   type ResolvedItem,
 } from "@/lib/wled/playlist";
+import { PROPOSALS } from "@/lib/wled/proposals";
 import { useBench } from "@/lib/wled/store";
 
 function sleep(ms: number) {
@@ -167,6 +167,28 @@ export function PlaylistPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="panel grid gap-3">
+        <div>
+          <p className="font-medium">Ready mixes</p>
+          <p className="text-sm text-muted">Slow holds, saturated color, no strobes. They play in the preview immediately.</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {PROPOSALS.map((mix) => (
+            <button
+              key={mix.name}
+              type="button"
+              className="btn h-auto min-h-11 flex-col items-start py-2 text-left"
+              onClick={() => {
+                useBench.getState().setPlaylist(mix);
+                setNote(`${mix.name} · ${mix.items.length} looks.`);
+              }}
+            >
+              <span className="font-medium">{mix.name}</span>
+              <span className="text-xs text-muted">{mix.items.length} looks · {mix.items.map((i) => i.name).slice(0, 3).join(", ")}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="panel grid gap-3">
         <div className="flex flex-wrap gap-2">
           <button type="button" className={`btn ${mode === "forge" ? "btn-primary" : ""}`} onClick={() => setMode("forge")}>
             New looks
@@ -190,7 +212,7 @@ export function PlaylistPanel() {
             <input
               className="mt-1 h-11 w-full rounded-md border border-line bg-bg-inset px-3 text-fg"
               type="number"
-              min={2}
+              min={8}
               max={120}
               value={hold}
               onChange={(e) => setHold(Number(e.target.value))}
@@ -262,7 +284,7 @@ export function PlaylistPanel() {
             {playlist.items.map((item, i) => {
               const pal = item.forge?.paletteId ?? item.lamp?.paletteId ?? 0;
               const colors = item.forge?.colors ?? item.lamp?.colors ?? [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-              const gradient = stopsFor(pal, colors, 0).stops.map(toHex).join(",");
+              const gradient = stopsFor(pal, colors, 0).stops.map((c) => toHex(vivid(c))).join(",");
               const current = playlistOn && i === playlistIndex % playlist.items.length;
               return (
                 <li key={item.uid}>

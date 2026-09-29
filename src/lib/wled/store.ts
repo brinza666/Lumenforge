@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { LampSnapshot } from "@/lib/wled/client";
 import { EFFECTS, effectById } from "@/lib/wled/engine";
+import { makeBenchFile, parseBenchFile, type BackupSlot, type BenchFile } from "@/lib/wled/archive";
+import { defaultFixture, fixtureCount, type Fixture } from "@/lib/wled/fixture";
 import {
   buildMix,
   defaultLook,
@@ -13,7 +15,7 @@ import {
 } from "@/lib/wled/playlist";
 import type { RGB } from "@/lib/wled/palettes";
 
-export type Tab = "look" | "playlist" | "lamp" | "flash";
+export type Tab = "look" | "playlist" | "keep" | "lamp" | "flash";
 
 export type SketchStage = {
   kind: "sketch";
@@ -50,6 +52,9 @@ type Bench = {
   lampStatus: "idle" | "connecting" | "online" | "error";
   lampError: string;
   live: boolean;
+  fixture: Fixture;
+  saved: ForgeLook[];
+  backups: BackupSlot[];
   setTab: (tab: Tab) => void;
   patchLook: (patch: Partial<ForgeLook>) => void;
   surprise: () => void;
@@ -60,6 +65,14 @@ type Bench = {
   setBri: (bri: number) => void;
   setOn: (on: boolean) => void;
   setLedCount: (n: number) => void;
+  setFixture: (fixture: Fixture) => void;
+  saveCurrentLook: () => void;
+  applySaved: (uid: string) => void;
+  removeSaved: (uid: string) => void;
+  rememberBackup: (name?: string) => void;
+  restoreBackup: (id: string) => void;
+  removeBackup: (id: string) => void;
+  applyBenchFile: (file: BenchFile) => void;
   setListen: (listen: boolean) => void;
   setPlaylist: (playlist: Mix) => void;
   setPlaylistOn: (on: boolean) => void;
@@ -79,8 +92,8 @@ const emptyMix: Mix = {
   name: "Forge mix",
   seed: 14017,
   mode: "forge",
-  hold: 8,
-  fade: 0.8,
+  hold: 12,
+  fade: 1.4,
   items: [],
 };
 
@@ -91,7 +104,7 @@ export const useBench = create<Bench>()(
       look: defaultLook(),
       stage: { kind: "forge" },
       playing: true,
-      bri: 180,
+      bri: 220,
       on: true,
       ledCount: 72,
       listen: false,
@@ -107,6 +120,9 @@ export const useBench = create<Bench>()(
       lampStatus: "idle",
       lampError: "",
       live: false,
+      fixture: defaultFixture(),
+      saved: [],
+      backups: [],
       setTab: (tab) => set({ tab }),
       patchLook: (patch) =>
         set({
@@ -140,7 +156,69 @@ export const useBench = create<Bench>()(
       setPlaying: (playing) => set({ playing }),
       setBri: (bri) => set({ bri }),
       setOn: (on) => set({ on }),
-      setLedCount: (ledCount) => set({ ledCount: Math.max(8, Math.min(600, Math.round(ledCount))) }),
+      setLedCount: (ledCount) => {
+        const count = Math.max(8, Math.min(300, Math.round(ledCount)));
+        const fixture = get().fixture;
+        set({
+          ledCount: count,
+          fixture: fixture.kind === "ribbon" ? { kind: "ribbon", count } : fixture,
+        });
+      },
+      setFixture: (fixture) => {
+        const next = fixture.kind === "ribbon" ? { kind: "ribbon" as const, count: Math.max(8, Math.min(300, Math.round(fixture.count))) } : fixture;
+        set({ fixture: next, ledCount: fixtureCount(next) });
+      },
+      saveCurrentLook: () => {
+        const look = { ...get().look, uid: `s${Date.now().toString(36)}` };
+        set({ saved: [look, ...get().saved.filter((s) => s.name !== look.name)].slice(0, 40) });
+      },
+      applySaved: (uid) => {
+        const look = get().saved.find((s) => s.uid === uid);
+        if (!look) return;
+        set({ look: { ...look }, stage: { kind: "forge" }, playlistOn: false, tab: "look" });
+      },
+      removeSaved: (uid) => set({ saved: get().saved.filter((s) => s.uid !== uid) }),
+      rememberBackup: (name) => {
+        const state = get();
+        const file = makeBenchFile({
+          name: name || "Bench backup",
+          fixture: state.fixture,
+          bri: state.bri,
+          look: state.look,
+          saved: state.saved,
+          playlist: state.playlist,
+        });
+        const slot: BackupSlot = {
+          id: `b${Date.now().toString(36)}`,
+          name: file.name || "Bench backup",
+          at: file.exportedAt || new Date().toISOString(),
+          file,
+        };
+        set({ backups: [slot, ...state.backups].slice(0, 6) });
+      },
+      restoreBackup: (id) => {
+        const slot = get().backups.find((b) => b.id === id);
+        if (slot) get().applyBenchFile(slot.file);
+      },
+      removeBackup: (id) => set({ backups: get().backups.filter((b) => b.id !== id) }),
+      applyBenchFile: (file) => {
+        const parsed = parseBenchFile(file);
+        if (!parsed.ok) return;
+        const next = parsed.file;
+        set({
+          fixture: next.fixture,
+          ledCount: fixtureCount(next.fixture),
+          bri: next.bri,
+          look: next.look,
+          saved: next.saved ?? [],
+          playlist: next.playlist,
+          playlistIndex: 0,
+          playlistOn: next.playlist.items.length > 0,
+          playlistEpoch: get().playlistEpoch + 1,
+          stage: { kind: "forge" },
+          tab: "playlist",
+        });
+      },
       setListen: (listen) => set({ listen }),
       setPlaylist: (playlist) =>
         set({ playlist, playlistIndex: 0, playlistEpoch: get().playlistEpoch + 1, playlistOn: playlist.items.length > 0 }),
@@ -182,6 +260,18 @@ export const useBench = create<Bench>()(
     {
       name: "lumenforge",
       skipHydration: true,
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<Bench>;
+        const fixture = saved.fixture ?? (typeof saved.ledCount === "number" ? { kind: "ribbon" as const, count: saved.ledCount } : current.fixture);
+        return {
+          ...current,
+          ...saved,
+          fixture,
+          saved: saved.saved ?? [],
+          backups: saved.backups ?? [],
+          ledCount: fixtureCount(fixture),
+        };
+      },
       partialize: (s) => ({
         tab: s.tab,
         look: s.look,
@@ -189,6 +279,9 @@ export const useBench = create<Bench>()(
         bri: s.bri,
         on: s.on,
         ledCount: s.ledCount,
+        fixture: s.fixture,
+        saved: s.saved,
+        backups: s.backups,
         playlist: s.playlist,
         hostInput: s.hostInput,
         recentHosts: s.recentHosts,

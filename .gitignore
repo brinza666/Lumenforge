@@ -6,3 +6,12 @@ artifacts/
 .github_repo
 .env
 .env.*
+*.log
+.DS_Store
+dist/
+coverage/
+*.tsbuildinfo
+.grok/preview.log
+.grok/status
+.grok/og-pending
+.grok/skills/

@@ -14,7 +14,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Design original WLED looks, preview them on a strip, build playlists, and send them to a lamp or a custom firmware.",
+          "Design bright WLED looks for LED ribbons and matrices, preview them without a lamp, and back the bench up.",
       },
       { name: "theme-color", content: "#12130f" },
     ],
@@ -26,7 +26,7 @@ export const Route = createRootRoute({
     ],
   }),
   component: () => (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="antialiased" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>

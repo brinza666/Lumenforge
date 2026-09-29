@@ -33,6 +33,9 @@ export type ForgeParams = {
   mirror: boolean;
   reverse: boolean;
   audio: AudioLevels;
+  /** Visual columns. Ribbon uses n. */
+  cols?: number;
+  rows?: number;
 };
 
 export type EffectDef = {
@@ -42,6 +45,8 @@ export type EffectDef = {
   blurb: string;
   nativeName: string;
   audio: boolean;
+  /** False = preview and live stream only. Omitted means it ships in the usermod. */
+  firmware?: boolean;
   defaults: { speed: number; intensity: number; size: number; spark: number; paletteId: number };
 };
 
@@ -80,10 +85,12 @@ function rnd(s: EngineState): number {
 
 function write(buf: Uint8ClampedArray, i: number, c: RGB, gain = 1) {
   const o = i * 3;
-  const g = gain < 0 ? 0 : gain;
-  buf[o] = c[0] * g;
-  buf[o + 1] = c[1] * g;
-  buf[o + 2] = c[2] * g;
+  const x = gain < 0 ? 0 : gain;
+  // Floor keeps a ribbon readable. Peaks still outrun the wash, but nothing goes black.
+  const g = 0.38 + 0.62 * Math.min(1, x);
+  buf[o] = Math.min(255, c[0] * g);
+  buf[o + 1] = Math.min(255, c[1] * g);
+  buf[o + 2] = Math.min(255, c[2] * g);
 }
 
 function blendMax(buf: Uint8ClampedArray, n: number, i: number, c: RGB, gain: number) {
@@ -101,6 +108,36 @@ function paintPalette(p: ForgeParams, buf: Uint8ClampedArray, pixel: (i: number,
     const s = pixel(i, u);
     write(buf, i, sampleStops(stops, s.idx, discrete), s.gain);
   }
+}
+
+function gridOf(p: ForgeParams): { cols: number; rows: number } {
+  const cols = p.cols && p.cols > 0 ? p.cols : Math.max(1, p.n);
+  const rows = p.rows && p.rows > 0 ? p.rows : 1;
+  return { cols, rows };
+}
+
+function paintGrid(
+  p: ForgeParams,
+  buf: Uint8ClampedArray,
+  pixel: (x: number, y: number, u: number, v: number) => { idx: number; gain: number },
+) {
+  const { cols, rows } = gridOf(p);
+  const { stops, discrete } = stopsFor(p.paletteId, p.colors, p.t);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      if (i >= p.n) return;
+      const u = cols <= 1 ? 0 : x / (cols - 1);
+      const v = rows <= 1 ? 0 : y / (rows - 1);
+      const s = pixel(x, y, u, v);
+      write(buf, i, sampleStops(stops, s.idx, discrete), s.gain);
+    }
+  }
+}
+
+/** Map a 0–255 speed slider onto a calm tempo. Full-scale is still slower than a blink. */
+export function calmSpeed(speed: number): number {
+  return Math.max(0, Math.min(110, Math.round((speed / 255) * 110)));
 }
 
 function env(p: ForgeParams): number {
@@ -331,6 +368,131 @@ function renderRibbon(p: ForgeParams, s: EngineState, buf: Uint8ClampedArray) {
   });
 }
 
+function renderDrift(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.08 + (p.speed / 255) * 0.35;
+  paintGrid(p, buf, (x, y, u, v) => {
+    const n = noise1(u * (1.2 + p.size / 180) + p.t * spd) * 0.6 + noise1(v * 1.4 - p.t * spd * 0.7 + 4) * 0.4;
+    return { idx: (n * 220 + p.t * 8) % 256, gain: 0.72 + n * 0.28 };
+  });
+}
+
+function renderBloom(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const { cols, rows } = gridOf(p);
+  const spd = 0.12 + (p.speed / 255) * 0.45;
+  const blobs = 3 + Math.round((p.intensity / 255) * 2);
+  paintGrid(p, buf, (x, y, u, v) => {
+    let vsum = 0.45;
+    for (let k = 0; k < blobs; k++) {
+      const cx = 0.5 + 0.38 * Math.sin(p.t * spd * (0.7 + k * 0.17) + k * 2.1);
+      const cy = rows <= 1 ? 0.5 : 0.5 + 0.38 * Math.cos(p.t * spd * (0.55 + k * 0.13) + k);
+      const dx = (x / Math.max(1, cols - 1) - cx) * (cols / Math.max(cols, rows));
+      const dy = rows <= 1 ? 0 : (y / Math.max(1, rows - 1) - cy) * (rows / Math.max(cols, rows));
+      const rad = 0.12 + (p.size / 255) * 0.22;
+      vsum += Math.exp(-(dx * dx + dy * dy) / (2 * rad * rad)) * 0.7;
+    }
+    return { idx: (u * 80 + v * 80 + p.t * 10) % 256, gain: Math.min(1.15, vsum) };
+  });
+}
+
+function renderOrbit(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const { cols, rows } = gridOf(p);
+  const spd = 0.25 + (p.speed / 255) * 0.7;
+  const reach = 0.28 + (p.size / 255) * 0.18;
+  paintGrid(p, buf, (x, y, u, v) => {
+    const nx = cols <= 1 ? u : x / (cols - 1);
+    const ny = rows <= 1 ? 0.5 : y / (rows - 1);
+    let glow = 0.42;
+    for (let k = 0; k < 2; k++) {
+      const ang = p.t * spd + k * Math.PI;
+      const cx = 0.5 + Math.cos(ang) * reach;
+      const cy = 0.5 + Math.sin(ang * (rows <= 1 ? 0 : 1)) * reach * (rows <= 1 ? 0 : 1);
+      const dx = nx - cx;
+      const dy = ny - (rows <= 1 ? 0.5 : cy);
+      const rad = 0.08 + p.intensity / 2200;
+      glow += Math.exp(-(dx * dx + dy * dy) / (2 * rad * rad));
+    }
+    return { idx: (u * 140 + p.t * 12 + v * 40) % 256, gain: Math.min(1.2, glow) };
+  });
+}
+
+function renderSpiral(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const { cols, rows } = gridOf(p);
+  const spd = 0.15 + (p.speed / 255) * 0.55;
+  const turns = 1.2 + (p.size / 255) * 2.4;
+  paintGrid(p, buf, (x, y, u, v) => {
+    const cx = (cols <= 1 ? u : x / (cols - 1)) - 0.5;
+    const cy = (rows <= 1 ? 0 : y / (rows - 1)) - 0.5;
+    const ang = Math.atan2(cy || 0.001, cx);
+    const rad = Math.hypot(cx, rows <= 1 ? 0 : cy);
+    const wave = 0.5 + 0.5 * Math.sin(ang * turns + rad * 10 - p.t * spd * 3);
+    return { idx: ((ang / Math.PI + 1) * 90 + rad * 80 + p.t * 14) % 256, gain: 0.5 + wave * (0.35 + p.intensity / 700) };
+  });
+}
+
+function renderHalo(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const { cols, rows } = gridOf(p);
+  const spd = 0.12 + (p.speed / 255) * 0.4;
+  const period = 7;
+  const phase = (p.t * spd) % period;
+  paintGrid(p, buf, (x, y, u, v) => {
+    const cx = (cols <= 1 ? u : x / (cols - 1)) - 0.5;
+    const cy = (rows <= 1 ? 0 : y / Math.max(1, rows - 1)) - 0.5;
+    const rad = Math.hypot(cx * 2, (rows <= 1 ? 0 : cy) * 2);
+    const ring = (phase / period) * 1.35;
+    const band = Math.exp(-((rad - ring) ** 2) / (2 * (0.045 + p.size / 4000) ** 2));
+    return { idx: (ring * 180 + u * 40 + v * 20) % 256, gain: 0.5 + band * (0.45 + p.intensity / 500) };
+  });
+}
+
+function renderLantern(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.18 + (p.speed / 255) * 0.35;
+  const breath = 0.72 + 0.28 * Math.sin(p.t * spd);
+  paintGrid(p, buf, (x, y, u, v) => {
+    const core = Math.exp(-((u - 0.5) ** 2 + (v - 0.5) ** 2) * (3 + (255 - p.size) / 40));
+    return { idx: (40 + breath * 30 + u * 20) % 256, gain: breath * (0.62 + core * (0.4 + p.intensity / 600)) };
+  });
+}
+
+function renderCurrent(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.2 + (p.speed / 255) * 0.7;
+  const bands = 1 + (p.size / 255) * 2.2;
+  paintGrid(p, buf, (_x, _y, u, v) => {
+    const wave = 0.5 + 0.5 * Math.sin((u * bands + v * 0.35) * Math.PI * 2 - p.t * spd);
+    return { idx: (u * 160 + wave * 70 + p.t * 10) % 256, gain: 0.55 + wave * (0.4 + p.intensity / 700) };
+  });
+}
+
+function renderGarden(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.06 + (p.speed / 255) * 0.22;
+  const scale = 1.4 + (p.size / 255) * 2.2;
+  paintGrid(p, buf, (_x, _y, u, v) => {
+    const n = noise1(u * scale + p.t * spd) * noise1(v * scale * 1.3 - p.t * spd + 2.2);
+    return { idx: (n * 255 + 40) % 256, gain: 0.58 + n * (0.4 + p.intensity / 600) };
+  });
+}
+
+function renderLinen(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.08 + (p.speed / 255) * 0.22;
+  const fade = 0.5 + 0.5 * Math.sin(p.t * spd);
+  paintGrid(p, buf, (_x, _y, u, v) => {
+    const across = 0.5 + 0.5 * Math.sin(u * Math.PI + v * 0.6);
+    return { idx: (fade * 140 + across * 90) % 256, gain: 0.7 + across * 0.25 * (0.6 + p.intensity / 400) };
+  });
+}
+
+function renderSail(p: ForgeParams, _s: EngineState, buf: Uint8ClampedArray) {
+  const spd = 0.18 + (p.speed / 255) * 0.55;
+  const width = 0.18 + (p.size / 255) * 0.28;
+  paintGrid(p, buf, (_x, _y, u, v) => {
+    const head = (p.t * spd * 0.15) % 1;
+    const d = Math.abs(u - head);
+    const wrap = Math.min(d, 1 - d);
+    const body = Math.exp(-(wrap * wrap) / (2 * width * width));
+    const shear = 0.5 + 0.5 * Math.sin(v * 3 + p.t * spd);
+    return { idx: (u * 200 + shear * 40) % 256, gain: 0.48 + body * (0.55 + p.intensity / 500) };
+  });
+}
+
 const RENDERERS: Record<string, (p: ForgeParams, s: EngineState, buf: Uint8ClampedArray) => void> = {
   tide: renderTide,
   emberline: renderEmber,
@@ -344,6 +506,16 @@ const RENDERERS: Record<string, (p: ForgeParams, s: EngineState, buf: Uint8Clamp
   veil: renderVeil,
   drizzle: renderDrizzle,
   ribbon: renderRibbon,
+  drift: renderDrift,
+  bloom: renderBloom,
+  orbit: renderOrbit,
+  spiral: renderSpiral,
+  halo: renderHalo,
+  lantern: renderLantern,
+  current: renderCurrent,
+  garden: renderGarden,
+  linen: renderLinen,
+  sail: renderSail,
 };
 
 export const EFFECTS: EffectDef[] = [
@@ -351,7 +523,7 @@ export const EFFECTS: EffectDef[] = [
     id: "veil",
     name: "Veil",
     fxName: "LF Veil",
-    blurb: "Slow sheets of color crossing a dark room.",
+    blurb: "Slow sheets of saturated color.",
     nativeName: "Aurora",
     audio: false,
     defaults: { speed: 42, intensity: 160, size: 110, spark: 40, paletteId: 50 },
@@ -455,6 +627,106 @@ export const EFFECTS: EffectDef[] = [
     audio: true,
     defaults: { speed: 70, intensity: 180, size: 90, spark: 80, paletteId: 57 },
   },
+  {
+    id: "drift",
+    name: "Drift",
+    fxName: "LF Drift",
+    blurb: "A slow field of saturated color. Nothing flashes.",
+    nativeName: "Flow",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 36, intensity: 180, size: 120, spark: 0, paletteId: 11 },
+  },
+  {
+    id: "bloom",
+    name: "Bloom",
+    fxName: "LF Bloom",
+    blurb: "Soft bright blobs wandering across the fixture.",
+    nativeName: "Plasma",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 40, intensity: 170, size: 140, spark: 0, paletteId: 27 },
+  },
+  {
+    id: "orbit",
+    name: "Orbit",
+    fxName: "LF Orbit",
+    blurb: "Two luminous orbs circling at an easy pace.",
+    nativeName: "Sinelon Dual",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 48, intensity: 200, size: 100, spark: 0, paletteId: 57 },
+  },
+  {
+    id: "spiral",
+    name: "Spiral",
+    fxName: "LF Spiral",
+    blurb: "A slow spiral. On a matrix it reads as a picture; on a ribbon, as a turning wash.",
+    nativeName: "Palette",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 34, intensity: 160, size: 130, spark: 0, paletteId: 6 },
+  },
+  {
+    id: "halo",
+    name: "Halo",
+    fxName: "LF Halo",
+    blurb: "One soft ring expanding, with the field still lit behind it.",
+    nativeName: "Ripple",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 32, intensity: 150, size: 90, spark: 0, paletteId: 63 },
+  },
+  {
+    id: "lantern",
+    name: "Lantern",
+    fxName: "LF Lantern",
+    blurb: "A long breath of one bright color. No blink.",
+    nativeName: "Breathe",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 28, intensity: 190, size: 160, spark: 0, paletteId: 47 },
+  },
+  {
+    id: "current",
+    name: "Current",
+    fxName: "LF Current",
+    blurb: "Wide bands sliding along the fixture.",
+    nativeName: "Colorwaves",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 44, intensity: 170, size: 110, spark: 0, paletteId: 9 },
+  },
+  {
+    id: "garden",
+    name: "Garden",
+    fxName: "LF Garden",
+    blurb: "Large patches of ripe color, barely moving.",
+    nativeName: "Noise Pal",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 24, intensity: 180, size: 100, spark: 0, paletteId: 19 },
+  },
+  {
+    id: "linen",
+    name: "Linen",
+    fxName: "LF Linen",
+    blurb: "Two bright hues trading places over many seconds.",
+    nativeName: "Fade",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 22, intensity: 150, size: 80, spark: 0, paletteId: 44 },
+  },
+  {
+    id: "sail",
+    name: "Sail",
+    fxName: "LF Sail",
+    blurb: "One broad wave crossing the lights, then coming around again.",
+    nativeName: "Sweep",
+    audio: false,
+    firmware: false,
+    defaults: { speed: 38, intensity: 180, size: 140, spark: 0, paletteId: 51 },
+  },
 ];
 
 const byId = new Map(EFFECTS.map((e) => [e.id, e]));
@@ -502,28 +774,29 @@ function applyReverse(buf: Uint8ClampedArray, n: number) {
   }
 }
 
-export function renderForge(id: string, params: ForgeParams, buf: Uint8ClampedArray) {
+export function renderForge(id: string, params: ForgeParams, buf: Uint8ClampedArray, lane = "play") {
   const fx = RENDERERS[id] ?? renderVeil;
-  const state = borrow(`forge:${id}`, params.n);
-  fx(params, state, buf);
+  const state = borrow(`${lane}:${id}:${params.n}`, params.n);
+  fx({ ...params, speed: calmSpeed(params.speed) }, state, buf);
   if (params.mirror) applyMirror(buf, params.n);
   if (params.reverse) applyReverse(buf, params.n);
 }
 
 export type SketchKind = "solid" | "pulse" | "chase" | "flow" | "spark" | "fire" | "ripple";
 
-export function renderSketch(kind: SketchKind, params: ForgeParams, buf: Uint8ClampedArray) {
-  const state = borrow(`sketch:${kind}`, params.n);
-  if (kind === "fire") renderEmber(params, state, buf);
-  else if (kind === "spark") renderGlint(params, state, buf);
-  else if (kind === "chase") renderComet({ ...params, spark: 20 }, state, buf);
-  else if (kind === "ripple") renderWell(params, state, buf);
-  else if (kind === "pulse") renderThrob(params, state, buf);
+export function renderSketch(kind: SketchKind, params: ForgeParams, buf: Uint8ClampedArray, lane = "play") {
+  const calmed = { ...params, speed: calmSpeed(params.speed) };
+  const state = borrow(`${lane}:sketch:${kind}:${params.n}`, params.n);
+  if (kind === "fire") renderEmber(calmed, state, buf);
+  else if (kind === "spark") renderGlint(calmed, state, buf);
+  else if (kind === "chase") renderComet({ ...calmed, spark: 20 }, state, buf);
+  else if (kind === "ripple") renderWell(calmed, state, buf);
+  else if (kind === "pulse") renderThrob(calmed, state, buf);
   else if (kind === "solid") {
-    const { stops, discrete } = stopsFor(params.paletteId, params.colors, params.t);
+    const { stops, discrete } = stopsFor(calmed.paletteId, calmed.colors, calmed.t);
     const col = sampleStops(stops, 40, discrete);
-    for (let i = 0; i < params.n; i++) write(buf, i, mixRgb(params.colors[0], col, 0.35), env(params));
-  } else renderRiver(params, state, buf);
+    for (let i = 0; i < calmed.n; i++) write(buf, i, mixRgb(calmed.colors[0], col, 0.35), env(calmed));
+  } else renderRiver(calmed, state, buf);
   if (params.mirror) applyMirror(buf, params.n);
   if (params.reverse) applyReverse(buf, params.n);
 }
@@ -555,6 +828,22 @@ function byte(n: number): string {
   return Math.max(0, Math.min(255, Math.round(n || 0)))
     .toString(16)
     .padStart(2, "0");
+}
+
+export function toWireOrder(src: Uint8ClampedArray, cols: number, rows: number, serpentine: boolean): Uint8ClampedArray {
+  if (!serpentine || rows <= 1) return src;
+  const out = new Uint8ClampedArray(cols * rows * 3);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const visual = (y * cols + x) * 3;
+      const wx = y % 2 === 1 ? cols - 1 - x : x;
+      const wire = (y * cols + wx) * 3;
+      out[wire] = src[visual] ?? 0;
+      out[wire + 1] = src[visual + 1] ?? 0;
+      out[wire + 2] = src[visual + 2] ?? 0;
+    }
+  }
+  return out;
 }
 
 export function frameMean(buf: Uint8ClampedArray): number {

@@ -206,15 +206,15 @@ export function sampleStops(stops: RGB[], index: number, discrete: boolean): RGB
   const u = (((index % 256) + 256) % 256) / 256;
   if (discrete) {
     const i = Math.min(stops.length - 1, Math.floor(u * stops.length));
-    return stops[i] ?? stops[0];
+    return vivid(stops[i] ?? stops[0]);
   }
-  if (stops.length === 1) return stops[0];
+  if (stops.length === 1) return vivid(stops[0]);
   const x = u * (stops.length - 1);
   const i = Math.floor(x);
   const f = x - i;
   const a = stops[i] ?? stops[0];
   const b = stops[Math.min(stops.length - 1, i + 1)] ?? a;
-  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  return vivid([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]);
 }
 
 export function toHex(c: RGB): string {
@@ -236,6 +236,45 @@ export function rgbHex(r: number, g: number, b: number): string {
       .toString(16)
       .padStart(2, "0");
   return `${byte(r)}${byte(g)}${byte(b)}`;
+}
+
+export function vivid(c: RGB): RGB {
+  let r = c[0] / 255;
+  let g = c[1] / 255;
+  let b = c[2] / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l0 = (max + min) / 2;
+  const d = max - min;
+  let h = 0;
+  let s = 0;
+  if (d > 1e-5) {
+    s = l0 > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  // Ribbons wash out anything near black or gray. Keep hue, force a lamp-visible chroma.
+  const sat = Math.max(0.72, Math.min(1, s));
+  const lig = Math.min(0.64, Math.max(0.48, l0 < 0.34 ? 0.54 : l0));
+  return hsl(h, sat, lig);
+}
+
+function hsl(h: number, s: number, l: number): RGB {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = h * 6;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
 export function mixRgb(a: RGB, b: RGB, t: number): RGB {

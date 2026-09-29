@@ -2,8 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Pause, Play, Power, Radio } from "lucide-react";
 import { sketchKindForName } from "@/lib/wled/catalog";
 import { postState } from "@/lib/wled/client";
-import { effectById, groupPixels, renderForge, renderSketch, SILENT_AUDIO, type AudioLevels, type ForgeParams } from "@/lib/wled/engine";
+import {
+  effectById,
+  groupPixels,
+  renderForge,
+  renderSketch,
+  SILENT_AUDIO,
+  toWireOrder,
+  type AudioLevels,
+  type ForgeParams,
+} from "@/lib/wled/engine";
+import { fixtureLabel, MATRIX_PRESETS, RIBBON_PRESETS, type Fixture } from "@/lib/wled/fixture";
 import type { PlaylistItem } from "@/lib/wled/playlist";
+import { paintFixture } from "@/lib/wled/preview-draw";
 import { activeItem, useBench, type SketchStage } from "@/lib/wled/store";
 
 type Levels = AudioLevels;
@@ -78,22 +89,22 @@ class MicTap {
 function levelsFor(t: number, active: boolean, mic: MicTap | null, lastPeak: { t: number }): Levels {
   const live = mic?.sample();
   if (live && active) {
-    const peak = live.bass > 0.55 && t - lastPeak.t > 0.12;
+    const peak = live.bass > 0.55 && t - lastPeak.t > 0.28;
     if (peak) lastPeak.t = t;
     return { active: true, synthetic: false, peak, ...live };
   }
   if (!active) return SILENT_AUDIO;
-  const kick = Math.pow(Math.max(0, Math.sin(t * Math.PI * 2 * 1.6)), 14);
-  const peak = kick > 0.65 && t - lastPeak.t > 0.2;
+  const kick = Math.pow(Math.max(0, Math.sin(t * Math.PI * 2 * 0.9)), 8);
+  const peak = kick > 0.7 && t - lastPeak.t > 0.45;
   if (peak) lastPeak.t = t;
   return {
     active: true,
     synthetic: true,
     peak,
     bass: kick,
-    mid: 0.25 + 0.2 * Math.sin(t * 2.4),
-    high: 0.12 + 0.12 * Math.sin(t * 7),
-    energy: Math.min(1, 0.2 + kick * 0.8),
+    mid: 0.3 + 0.15 * Math.sin(t * 1.3),
+    high: 0.18 + 0.08 * Math.sin(t * 2.2),
+    energy: Math.min(1, 0.35 + kick * 0.6),
   };
 }
 
@@ -123,101 +134,48 @@ function paramsFrom(
   };
 }
 
-/** Screen is not an LED. Lift midtones so the preview reads as light; the lamp still gets linear bytes. */
-function showByte(v: number, gain: number) {
-  const x = Math.min(1, (v * gain) / 255);
-  if (x < 0.004) return 0;
-  return Math.min(255, Math.round(255 * Math.pow(x, 0.5)));
-}
-
-function paintDom(
-  wash: HTMLDivElement,
-  rail: HTMLDivElement,
-  buf: Uint8ClampedArray,
-  n: number,
-  on: boolean,
-  bri: number,
-) {
-  const gain = (on ? bri : 10) / 255;
-  const stops = 36;
-  const win = Math.max(1, Math.round(n / stops));
-  const parts: string[] = [];
-  for (let i = 0; i <= stops; i++) {
-    const center = Math.min(n - 1, Math.round((i / stops) * (n - 1)));
-    const a = Math.max(0, center - (win >> 1));
-    const b = Math.min(n - 1, a + win - 1);
-    let mr = 0;
-    let mg = 0;
-    let mb = 0;
-    for (let j = a; j <= b; j++) {
-      const o = j * 3;
-      if (buf[o] > mr) mr = buf[o];
-      if (buf[o + 1] > mg) mg = buf[o + 1];
-      if (buf[o + 2] > mb) mb = buf[o + 2];
-    }
-    parts.push(`rgb(${showByte(mr, gain)} ${showByte(mg, gain)} ${showByte(mb, gain)})`);
-  }
-  wash.style.background = `linear-gradient(90deg, ${parts.join(",")})`;
-  wash.style.opacity = on ? "1" : "0.28";
-
-  const glow = n <= 96;
-  while (rail.childElementCount < n) {
-    const el = document.createElement("span");
-    el.className = "block h-full min-w-0 flex-1 rounded-full";
-    rail.appendChild(el);
-  }
-  while (rail.childElementCount > n) rail.lastElementChild?.remove();
-  for (let i = 0; i < n; i++) {
-    const el = rail.children[i] as HTMLElement;
-    const o = i * 3;
-    const r = showByte(buf[o], gain);
-    const g = showByte(buf[o + 1], gain);
-    const b = showByte(buf[o + 2], gain);
-    el.style.background = `rgb(${r} ${g} ${b})`;
-    el.style.boxShadow = glow && r + g + b > 24 ? `0 0 12px 1px rgb(${r} ${g} ${b} / 0.9)` : "none";
-  }
-}
-
 function renderItem(
   buf: Uint8ClampedArray,
   n: number,
+  cols: number,
+  rows: number,
   t: number,
   dt: number,
   audio: Levels,
   item: PlaylistItem | null,
   look: ReturnType<typeof useBench.getState>["look"],
   stage: ReturnType<typeof useBench.getState>["stage"],
+  lane: string,
 ) {
-  const base = { n, t, dt, audio };
+  const base = { n, cols, rows, t, dt, audio };
   if (item?.forge) {
-    renderForge(item.forge.effect, paramsFrom(base, item.forge), buf);
+    renderForge(item.forge.effect, paramsFrom(base, item.forge), buf, lane);
     return;
   }
   if (item?.lamp) {
-    renderSketch(
-      sketchKindForName(item.lamp.fxName),
-      paramsFrom(base, { ...item.lamp, size: 100, spark: 80 }),
-      buf,
-    );
+    renderSketch(sketchKindForName(item.lamp.fxName), paramsFrom(base, { ...item.lamp, size: 100, spark: 40 }), buf, lane);
     return;
   }
   if (stage.kind === "sketch") {
     const sketch = stage as SketchStage;
-    renderSketch(sketchKindForName(sketch.fxName), paramsFrom(base, { ...sketch, size: 100, spark: 70 }), buf);
+    renderSketch(sketchKindForName(sketch.fxName), paramsFrom(base, { ...sketch, size: 100, spark: 40 }), buf, lane);
     return;
   }
-  renderForge(look.effect, paramsFrom(base, look), buf);
+  renderForge(look.effect, paramsFrom(base, look), buf, lane);
+}
+
+function shapeOf(fixture: Fixture): { n: number; cols: number; rows: number } {
+  if (fixture.kind === "matrix") return { n: fixture.cols * fixture.rows, cols: fixture.cols, rows: fixture.rows };
+  return { n: fixture.count, cols: fixture.count, rows: 1 };
 }
 
 export function Stage() {
-  const washRef = useRef<HTMLDivElement>(null);
-  const railRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const look = useBench((s) => s.look);
   const stage = useBench((s) => s.stage);
   const playing = useBench((s) => s.playing);
   const bri = useBench((s) => s.bri);
   const on = useBench((s) => s.on);
-  const ledCount = useBench((s) => s.ledCount);
   const listen = useBench((s) => s.listen);
   const playlist = useBench((s) => s.playlist);
   const playlistOn = useBench((s) => s.playlistOn);
@@ -225,9 +183,10 @@ export function Stage() {
   const playlistEpoch = useBench((s) => s.playlistEpoch);
   const live = useBench((s) => s.live);
   const lamp = useBench((s) => s.lamp);
+  const fixture = useBench((s) => s.fixture);
   const reduced = usePrefersReducedMotion();
   const [still, setStill] = useState(false);
-  const [meter, setMeter] = useState({ bass: 0, mid: 0, high: 0, synthetic: true, show: false });
+  const [meter, setMeter] = useState({ bass: 0, mid: 0, high: 0, show: false, synthetic: true });
   const [liveNote, setLiveNote] = useState("");
   const [micNote, setMicNote] = useState("");
 
@@ -237,7 +196,6 @@ export function Stage() {
     playing,
     bri,
     on,
-    ledCount,
     listen,
     playlist,
     playlistOn,
@@ -246,38 +204,19 @@ export function Stage() {
     live,
     lamp,
     still,
-    user: "",
-    password: "",
+    fixture,
   });
-  bag.current = {
-    look,
-    stage,
-    playing,
-    bri,
-    on,
-    ledCount,
-    listen,
-    playlist,
-    playlistOn,
-    playlistIndex,
-    playlistEpoch,
-    live,
-    lamp,
-    still,
-    user: useBench.getState().user,
-    password: useBench.getState().password,
-  };
+  bag.current = { look, stage, playing, bri, on, listen, playlist, playlistOn, playlistIndex, playlistEpoch, live, lamp, still, fixture };
 
   useEffect(() => {
     setStill(reduced);
   }, [reduced]);
 
   useEffect(() => {
-    const wash = washRef.current;
-    const rail = railRef.current;
-    if (!wash || !rail) return;
-    const buf = new Uint8ClampedArray(600 * 3);
-    const buf2 = new Uint8ClampedArray(600 * 3);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const buf = new Uint8ClampedArray(32 * 32 * 3);
+    const buf2 = new Uint8ClampedArray(32 * 32 * 3);
     const clock = { t: 1.2, itemT: 0, epoch: -1 };
     const peak = { t: -1 };
     let mic: MicTap | null = null;
@@ -323,7 +262,7 @@ export function Stage() {
             else tap.stop();
           })
           .catch(() => {
-            setMicNote("Microphone blocked. Audio looks keep a built-in beat.");
+            setMicNote("Microphone blocked. Sound looks keep a slow built-in pulse.");
             useBench.getState().setListen(false);
             micWanted = false;
           });
@@ -335,34 +274,38 @@ export function Stage() {
       }
       const audioOn = s.listen || (item?.forge?.audio ?? (!item && s.stage.kind === "forge" && s.look.audio));
       const audio = levelsFor(clock.t, audioOn, mic, peak);
-      const n = s.ledCount;
-      renderItem(buf, n, clock.t, dt || 0.016, audio, item ?? null, s.look, s.stage);
+      const shape = shapeOf(s.fixture);
+      renderItem(buf, shape.n, shape.cols, shape.rows, clock.t, dt || 0.016, audio, item ?? null, s.look, s.stage, "stage");
       if (item && count > 1 && item.fade > 0) {
         const remain = item.hold - clock.itemT;
         if (remain < item.fade && remain > 0) {
           const u = 1 - remain / item.fade;
           const next = s.playlist.items[(index + 1) % count];
-          renderItem(buf2, n, clock.t, dt || 0.016, audio, next, s.look, s.stage);
-          const pixels = n * 3;
+          renderItem(buf2, shape.n, shape.cols, shape.rows, clock.t, dt || 0.016, audio, next, s.look, s.stage, "fade");
+          const pixels = shape.n * 3;
           for (let i = 0; i < pixels; i++) buf[i] = buf[i] * (1 - u) + buf2[i] * u;
         }
       }
-      if (!document.hidden) paintDom(wash, rail, buf, n, s.on, s.bri);
+      if (!document.hidden) paintFixture(canvas, buf, shape.cols, shape.rows, s.on, s.bri);
 
+      const user = useBench.getState().user;
+      const password = useBench.getState().password;
       if (s.live && s.lamp && s.on) {
         if (!liveWas) {
           liveWas = true;
           const seg = (s.lamp.state as { seg?: { fx?: number }[] } | null)?.seg;
           savedFx = typeof seg?.[0]?.fx === "number" ? seg[0].fx : null;
-          void postState(s.lamp.origin, { on: true, bri: s.bri }, s.user, s.password).catch(() => undefined);
+          void postState(s.lamp.origin, { on: true, bri: s.bri }, user, password).catch(() => undefined);
         }
         if (now >= nextPush) {
-          nextPush = now + 125;
+          nextPush = now + 140;
           if (!inflight) {
             inflight = true;
-            const dst = Math.max(1, s.lamp.info.leds?.count || n);
-            const ranges = groupPixels(buf, n, dst, s.bri);
-            void postState(s.lamp.origin, { seg: [{ id: 0, i: ranges }] }, s.user, s.password)
+            const dst = Math.max(1, s.lamp.info.leds?.count || shape.n);
+            const wire =
+              s.fixture.kind === "matrix" ? toWireOrder(buf, shape.cols, shape.rows, s.fixture.serpentine) : buf;
+            const ranges = groupPixels(wire, shape.n, dst, s.bri);
+            void postState(s.lamp.origin, { seg: [{ id: 0, i: ranges }] }, user, password)
               .then(() => {
                 sent += 1;
                 errors = 0;
@@ -382,21 +325,15 @@ export function Stage() {
       } else if (liveWas) {
         liveWas = false;
         if (s.lamp && savedFx !== null) {
-          void postState(s.lamp.origin, { seg: [{ id: 0, fx: savedFx }] }, s.user, s.password).catch(() => undefined);
+          void postState(s.lamp.origin, { seg: [{ id: 0, fx: savedFx }] }, user, password).catch(() => undefined);
         }
       }
 
       if (now - stamp > 800) {
         stamp = now;
-        setLiveNote(s.live ? (sent ? `${sent} frames/s to the lamp` : "Reaching the lamp…") : "");
+        setLiveNote(s.live ? (sent ? `${Math.round(sent / 0.8)} frames/s to the lamp` : "Reaching the lamp…") : "");
         sent = 0;
-        setMeter({
-          bass: audio.bass,
-          mid: audio.mid,
-          high: audio.high,
-          synthetic: audio.synthetic,
-          show: audio.active,
-        });
+        setMeter({ bass: audio.bass, mid: audio.mid, high: audio.high, synthetic: audio.synthetic, show: audio.active });
       }
       raf = requestAnimationFrame(loop);
     };
@@ -410,35 +347,81 @@ export function Stage() {
   const item = activeItem({ playlist, playlistOn, playlistIndex });
   const fx = effectById(item?.forge?.effect ?? look.effect);
   let title = look.name;
-  let detail = `${fx.blurb} Original — not in stock WLED.`;
+  let detail = fx.blurb;
   if (item) {
     title = item.name;
-    detail = playlist.mode === "lamp" ? "Playlist of firmware effects. Sketch on the bench, real effect on the lamp." : "Playlist of original looks.";
+    detail = playlist.mode === "lamp" ? "Playlist of firmware effects, sketched here." : "Playlist of original looks.";
   } else if (stage.kind === "sketch") {
     title = stage.title;
-    detail = "Sketch only. The lamp runs the firmware effect, not this drawing.";
+    detail = "Sketch of a stock effect. The picture above is local — the lamp is optional.";
   }
 
   const showPlay = !playing || still;
+  const matrix = fixture.kind === "matrix";
+  const canvasStyle = matrix
+    ? { aspectRatio: `${fixture.cols} / ${fixture.rows}`, maxHeight: "70vw" }
+    : { height: "9.5rem" };
 
   return (
-    <section className="bg-bg-inset" aria-label="Strip preview">
-      <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-4">
-        <div className="flex items-end justify-between gap-3">
+    <section className="mx-auto w-full max-w-5xl px-4" aria-label="Light preview">
+      <div className="housing">
+        <div className="mb-3 flex items-end justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate font-display text-3xl leading-none italic text-fg">{title}</h2>
+            <p className="text-xs uppercase tracking-[0.14em] text-muted">{fixtureLabel(fixture)}</p>
+            <h2 className="truncate font-display text-3xl leading-none text-fg">{title}</h2>
             <p className="mt-1 text-sm text-muted">{detail}</p>
           </div>
-          <p className="hidden text-sm text-muted sm:block tabular-nums">{ledCount} lamps</p>
         </div>
-        <div ref={washRef} className="h-20 w-full rounded-md bg-bg sm:h-28" aria-hidden />
-        <div
-          ref={railRef}
-          className="flex h-10 w-full items-stretch gap-px sm:h-12"
-          role="img"
-          aria-label={`Preview of ${title}`}
-        />
-        <div className="flex flex-wrap items-center gap-2">
+        <canvas ref={canvasRef} className="fixture" style={canvasStyle} role="img" aria-label={`Preview of ${title}. No lamp required.`} />
+        <p className="mt-2 text-sm text-muted">This preview always runs in the browser. A lamp is only needed if you want to stream it.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" className={`btn ${fixture.kind === "ribbon" ? "btn-primary" : ""}`} onClick={() => useBench.getState().setFixture({ kind: "ribbon", count: fixture.kind === "ribbon" ? fixture.count : 60 })}>
+            Ribbon
+          </button>
+          <button
+            type="button"
+            className={`btn ${matrix ? "btn-primary" : ""}`}
+            onClick={() =>
+              useBench.getState().setFixture({
+                kind: "matrix",
+                cols: matrix ? fixture.cols : 16,
+                rows: matrix ? fixture.rows : 16,
+                serpentine: matrix ? fixture.serpentine : true,
+              })
+            }
+          >
+            Matrix
+          </button>
+          {fixture.kind === "ribbon"
+            ? RIBBON_PRESETS.map((count) => (
+                <button key={count} type="button" className={`btn ${fixture.count === count ? "btn-primary" : ""}`} onClick={() => useBench.getState().setFixture({ kind: "ribbon", count })}>
+                  {count}
+                </button>
+              ))
+            : MATRIX_PRESETS.map((size) => (
+                <button
+                  key={size.label}
+                  type="button"
+                  className={`btn ${fixture.cols === size.cols && fixture.rows === size.rows ? "btn-primary" : ""}`}
+                  onClick={() => useBench.getState().setFixture({ kind: "matrix", cols: size.cols, rows: size.rows, serpentine: fixture.serpentine })}
+                >
+                  {size.label}
+                </button>
+              ))}
+        </div>
+        {matrix ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              className={`btn ${fixture.serpentine ? "btn-primary" : ""}`}
+              onClick={() => useBench.getState().setFixture({ ...fixture, serpentine: !fixture.serpentine })}
+            >
+              {fixture.serpentine ? "Serpentine wiring" : "Row wiring"}
+            </button>
+            <p className="mt-1 text-xs text-muted">The picture stays readable. Serpentine only changes the order sent to a zigzag matrix.</p>
+          </div>
+        ) : null}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <button type="button" className={`btn ${on ? "btn-primary" : ""}`} onClick={() => useBench.getState().setOn(!on)}>
             <Power size={18} aria-hidden />
             {on ? "On" : "Off"}
@@ -450,9 +433,7 @@ export function Stage() {
               if (showPlay) {
                 setStill(false);
                 useBench.getState().setPlaying(true);
-              } else {
-                useBench.getState().setPlaying(false);
-              }
+              } else useBench.getState().setPlaying(false);
             }}
           >
             {showPlay ? <Play size={18} aria-hidden /> : <Pause size={18} aria-hidden />}
@@ -485,53 +466,35 @@ export function Stage() {
           {meter.show ? (
             <div className="ml-auto flex items-end gap-1" aria-hidden>
               {[meter.bass, meter.mid, meter.high].map((v, i) => (
-                <span
-                  key={i}
-                  className="w-1.5 rounded-sm bg-primary"
-                  style={{ height: `${8 + Math.round(v * 22)}px`, opacity: 0.45 + v * 0.55 }}
-                />
+                <span key={i} className="w-1.5 rounded-sm bg-primary" style={{ height: `${8 + Math.round(v * 22)}px`, opacity: 0.45 + v * 0.55 }} />
               ))}
-              <span className="ml-2 text-xs text-muted">{meter.synthetic ? "Beat" : "Mic"}</span>
+              <span className="ml-2 text-xs text-muted">{meter.synthetic ? "Pulse" : "Mic"}</span>
             </div>
           ) : null}
         </div>
-        <SliderRow />
-        {liveNote ? <p className="text-sm text-live">{liveNote}</p> : null}
-        {micNote ? <p className="text-sm text-muted">{micNote}</p> : null}
-        {!lamp ? (
-          <p className="text-sm text-muted">Stream sends this exact picture to a lamp. Connect one under Lamp — stock firmware cannot store the algorithm itself.</p>
-        ) : null}
+        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+          <label className="block">
+            <span className="field-label">
+              <span>Brightness</span>
+              <span className="text-fg tabular-nums">{bri}</span>
+            </span>
+            <input type="range" min={1} max={255} value={bri} aria-label="Brightness" onChange={(e) => useBench.getState().setBri(Number(e.target.value))} />
+          </label>
+          {fixture.kind === "ribbon" ? (
+            <label className="block">
+              <span className="field-label">
+                <span>LED count</span>
+                <span className="text-fg tabular-nums">{fixture.count}</span>
+              </span>
+              <input type="range" min={8} max={300} value={fixture.count} aria-label="LED count" onChange={(e) => useBench.getState().setLedCount(Number(e.target.value))} />
+            </label>
+          ) : (
+            <p className="self-end text-sm text-muted">{fixture.cols * fixture.rows} pixels in the preview.</p>
+          )}
+        </div>
+        {liveNote ? <p className="mt-2 text-sm text-live">{liveNote}</p> : null}
+        {micNote ? <p className="mt-2 text-sm text-muted">{micNote}</p> : null}
       </div>
     </section>
-  );
-}
-
-function SliderRow() {
-  const bri = useBench((s) => s.bri);
-  const ledCount = useBench((s) => s.ledCount);
-  return (
-    <div className="grid gap-1 sm:grid-cols-2">
-      <label className="block">
-        <span className="field-label">
-          <span>Brightness</span>
-          <span className="text-fg tabular-nums">{bri}</span>
-        </span>
-        <input type="range" min={1} max={255} value={bri} aria-label="Brightness" onChange={(e) => useBench.getState().setBri(Number(e.target.value))} />
-      </label>
-      <label className="block">
-        <span className="field-label">
-          <span>Preview length</span>
-          <span className="text-fg tabular-nums">{ledCount}</span>
-        </span>
-        <input
-          type="range"
-          min={12}
-          max={600}
-          value={ledCount}
-          aria-label="Preview length"
-          onChange={(e) => useBench.getState().setLedCount(Number(e.target.value))}
-        />
-      </label>
-    </div>
   );
 }

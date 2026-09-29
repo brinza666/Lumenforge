@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildAllUsermod, buildArti } from "./codegen.ts";
-import { EFFECTS, frameMean, groupPixels, renderForge, resetEngine, type ForgeParams } from "./engine.ts";
+import { STOCK_EFFECTS } from "./catalog.ts";
+import { EFFECTS, calmSpeed, frameMean, groupPixels, renderForge, resetEngine, toWireOrder, type ForgeParams } from "./engine.ts";
 import { buildMix, planSlots } from "./playlist.ts";
+import { PROPOSALS } from "./proposals.ts";
 import { parsePresets } from "./presets.ts";
 
 const colors: ForgeParams["colors"] = [
@@ -102,10 +104,12 @@ test("pixel groups stay under the packet cap", () => {
   assert.ok(typeof ranges[2] === "string" && (ranges[2] as string).length === 6);
 });
 
-test("usermod source registers every effect", () => {
+test("usermod source registers every firmware effect", () => {
   const cpp = buildAllUsermod();
-  assert.equal((cpp.match(/strip\.addEffect\(255/g) || []).length, EFFECTS.length);
-  for (const fx of EFFECTS) assert.ok(cpp.includes(fx.fxName), fx.fxName);
+  const shipped = EFFECTS.filter((fx) => fx.firmware !== false);
+  assert.equal((cpp.match(/strip\.addEffect\(255/g) || []).length, shipped.length);
+  for (const fx of shipped) assert.ok(cpp.includes(fx.fxName), fx.fxName);
+  assert.ok(!cpp.includes("LF Drift"));
   assert.ok(cpp.includes("REGISTER_USERMOD"));
   const arti = buildArti("tide");
   assert.equal(arti.fidelity, "close");
@@ -120,4 +124,89 @@ test("sample presets include the Vse playlist", () => {
   assert.ok(vse.length >= 1);
   assert.ok(vse[0].playlist.ps.length >= 50);
   assert.ok(vse.some((p) => p.playlist.ps.some((id) => id > 250)));
+});
+
+test("look cards do not reset the fixture simulation", () => {
+  const ember = (n: number): ForgeParams => ({
+    n,
+    t: 0.2,
+    dt: 0.05,
+    speed: 90,
+    intensity: 140,
+    size: 40,
+    spark: 200,
+    colors,
+    paletteId: 35,
+    mirror: false,
+    reverse: false,
+    audio: { active: false, energy: 0, bass: 0, mid: 0, high: 0, peak: false, synthetic: true },
+  });
+  const solo = () => {
+    resetEngine();
+    const p = ember(60);
+    const buf = new Uint8ClampedArray(60 * 3);
+    for (let i = 0; i < 24; i++) {
+      p.t += 0.05;
+      renderForge("emberline", p, buf, "stage");
+    }
+    return Buffer.from(buf);
+  };
+  const mixed = () => {
+    resetEngine();
+    const p = ember(60);
+    const thumb = ember(64);
+    const buf = new Uint8ClampedArray(60 * 3);
+    const card = new Uint8ClampedArray(64 * 3);
+    for (let i = 0; i < 24; i++) {
+      p.t += 0.05;
+      thumb.t += 0.05;
+      renderForge("emberline", thumb, card, "thumb");
+      renderForge("emberline", p, buf, "stage");
+    }
+    return Buffer.from(buf);
+  };
+  const picture = solo();
+  assert.deepEqual(mixed(), picture);
+  let sum = 0;
+  for (const v of picture) sum += v;
+  assert.ok(sum / picture.length > 1);
+});
+
+test("speed stays below a blink", () => {
+  assert.equal(calmSpeed(0), 0);
+  assert.equal(calmSpeed(255), 110);
+  assert.ok(calmSpeed(128) < 80);
+});
+
+test("serpentine remap flips odd rows only", () => {
+  const src = new Uint8ClampedArray(8 * 2 * 3);
+  src[0] = 10;
+  src[(1 * 8 + 0) * 3] = 20;
+  const out = toWireOrder(src, 8, 2, true);
+  assert.equal(out[0], 10);
+  assert.equal(out[(1 * 8 + 7) * 3], 20);
+  assert.equal(toWireOrder(src, 8, 2, false), src);
+});
+
+test("generated lamp mixes skip strobes and hold long enough", () => {
+  const names = [...STOCK_EFFECTS, "Strobe", "Blink Rainbow", "Police", "Lightning", "ICU", "Chase Flash"];
+  const mix = buildMix({ mode: "lamp", count: 80, seed: 9, hold: 2, fade: 1, varied: true, names });
+  assert.ok(mix.items.length === 80);
+  assert.ok(mix.hold >= 8);
+  for (const item of mix.items) {
+    assert.ok(item.hold >= 6, String(item.hold));
+    assert.ok(!/strobe|blink|lightning|police|icu|flash/i.test(item.name), item.name);
+  }
+});
+
+test("ready mixes use real looks", () => {
+  const ids = new Set(EFFECTS.map((fx) => fx.id));
+  assert.equal(PROPOSALS.length, 5);
+  for (const mix of PROPOSALS) {
+    assert.ok(mix.items.length >= 5, mix.name);
+    for (const item of mix.items) {
+      assert.ok(item.forge && ids.has(item.forge.effect), item.name);
+      assert.ok(item.hold >= 10, item.name);
+    }
+  }
 });

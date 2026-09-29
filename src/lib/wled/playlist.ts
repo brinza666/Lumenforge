@@ -47,26 +47,26 @@ export type Mix = {
 };
 
 const ADJ = [
-  "slow",
-  "glass",
-  "night",
-  "brass",
-  "wet",
-  "quiet",
-  "iron",
+  "clear",
+  "citrus",
+  "coral",
+  "gloss",
+  "ripe",
+  "fresh",
+  "vivid",
+  "sunny",
+  "bright",
+  "lively",
+  "candy",
   "amber",
-  "salt",
-  "pale",
-  "deep",
-  "thin",
+  "aqua",
+  "mango",
+  "petal",
+  "gold",
+  "lime",
   "warm",
-  "late",
-  "dim",
-  "wild",
-  "soft",
-  "hard",
-  "low",
-  "still",
+  "lucid",
+  "open",
 ];
 
 export function mulberry32(seed: number): () => number {
@@ -89,9 +89,9 @@ function uid(rng: () => number): string {
 }
 
 export const DEFAULT_COLORS: [RGB, RGB, RGB] = [
-  [186, 232, 198],
-  [18, 28, 48],
-  [232, 196, 140],
+  [255, 196, 64],
+  [255, 72, 120],
+  [64, 220, 255],
 ];
 
 export function defaultLook(): ForgeLook {
@@ -120,7 +120,7 @@ export function lookFromEffect(fx: EffectDef, rng: () => number = Math.random): 
     uid: uid(rng),
     name: `${pick(rng, ADJ)} ${fx.name.toLowerCase()}`,
     effect: fx.id,
-    speed: clampByte(fx.defaults.speed + Math.floor((rng() - 0.5) * 80)),
+    speed: clampByte(Math.min(120, fx.defaults.speed + Math.floor((rng() - 0.5) * 36))),
     intensity: clampByte(fx.defaults.intensity + Math.floor((rng() - 0.5) * 70)),
     size: clampByte(fx.defaults.size + Math.floor((rng() - 0.5) * 90)),
     spark: clampByte(fx.defaults.spark + Math.floor((rng() - 0.5) * 90)),
@@ -140,16 +140,24 @@ export function randomForgeLook(rng: () => number): ForgeLook {
   return lookFromEffect(pick(rng, EFFECTS), rng);
 }
 
+/** Stock names that strobe or flash. Skipped when a mix is generated. */
+const NOISY_FX = /strobe|\bblink\b|lightning|police|\bicu\b|flash/i;
+
+export function quietEffectNames(names: string[]): string[] {
+  const quiet = names.filter((n) => n !== "Solid" && !NOISY_FX.test(n));
+  return quiet.length > 0 ? quiet : names.filter((n) => n !== "Solid");
+}
+
 export function randomLampLook(rng: () => number, names: string[]): LampLook {
-  const pool = names.length > 0 ? names : STOCK_EFFECTS;
-  const fxName = pick(rng, pool.filter((n) => n !== "Solid")) || pool[0];
+  const pool = quietEffectNames(names.length > 0 ? names : STOCK_EFFECTS);
+  const fxName = pick(rng, pool) || pool[0] || "Fade";
   const paletteId = pick(rng, PALETTES.filter((p) => p.id >= 6)).id;
   const { stops } = stopsFor(paletteId, DEFAULT_COLORS, 0);
   const color = () => stops[Math.floor(rng() * stops.length)] ?? DEFAULT_COLORS[0];
   return {
     fxName,
-    speed: clampByte(40 + rng() * 200),
-    intensity: clampByte(30 + rng() * 210),
+    speed: clampByte(28 + rng() * 70),
+    intensity: clampByte(80 + rng() * 150),
     paletteId,
     colors: [color(), color(), color()],
     reverse: rng() > 0.8,
@@ -167,10 +175,11 @@ export function buildMix(opts: {
   names?: string[];
 }): Mix {
   const count = Math.max(1, Math.min(100, Math.round(opts.count)));
+  const holdBase = Math.max(8, opts.hold);
   const rng = mulberry32(opts.seed || 1);
   const items: PlaylistItem[] = [];
   for (let i = 0; i < count; i++) {
-    const hold = opts.varied ? Math.round(opts.hold * (0.65 + rng() * 0.7) * 10) / 10 : opts.hold;
+    const hold = opts.varied ? Math.round(holdBase * (0.75 + rng() * 0.5) * 10) / 10 : holdBase;
     if (opts.mode === "lamp") {
       const lamp = randomLampLook(rng, opts.names ?? STOCK_EFFECTS);
       items.push({
@@ -189,7 +198,7 @@ export function buildMix(opts: {
     name: opts.mode === "forge" ? "Forge mix" : "Lamp mix",
     seed: opts.seed || 1,
     mode: opts.mode,
-    hold: opts.hold,
+    hold: holdBase,
     fade: opts.fade,
     items,
   };
