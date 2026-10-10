@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { LampSnapshot } from "@/lib/wled/client";
+import { parseSubnet } from "@/lib/wled/client";
 import { EFFECTS, effectById } from "@/lib/wled/engine";
 import { makeBenchFile, parseBenchFile, type BackupSlot, type BenchFile } from "@/lib/wled/archive";
 import { defaultFixture, fixtureCount, type Fixture } from "@/lib/wled/fixture";
@@ -45,6 +46,7 @@ type Bench = {
   playlistOn: boolean;
   playlistEpoch: number;
   hostInput: string;
+  scanPrefix: string;
   recentHosts: string[];
   user: string;
   password: string;
@@ -80,6 +82,7 @@ type Bench = {
   setPlaylistIndex: (index: number) => void;
   addLookToMix: () => void;
   setHost: (host: string) => void;
+  setScanPrefix: (prefix: string) => void;
   setUser: (user: string) => void;
   setPassword: (password: string) => void;
   rememberHost: (origin: string) => void;
@@ -113,6 +116,7 @@ export const useBench = create<Bench>()(
       playlistOn: false,
       playlistEpoch: 0,
       hostInput: "wled.local",
+      scanPrefix: "",
       recentHosts: [],
       user: "wled",
       password: "",
@@ -246,12 +250,21 @@ export const useBench = create<Bench>()(
           tab: "playlist",
         });
       },
-      setHost: (hostInput) => set({ hostInput }),
+      setHost: (hostInput) => {
+        const prefix = parseSubnet(hostInput);
+        set(prefix ? { hostInput, scanPrefix: prefix } : { hostInput });
+      },
+      setScanPrefix: (scanPrefix) => set({ scanPrefix: parseSubnet(scanPrefix) ?? scanPrefix.trim() }),
       setUser: (user) => set({ user }),
       setPassword: (password) => set({ password }),
       rememberHost: (origin) => {
         const recent = [origin, ...get().recentHosts.filter((h) => h !== origin)].slice(0, 6);
-        set({ recentHosts: recent, hostInput: origin.replace(/^https?:\/\//, "") });
+        const prefix = parseSubnet(origin);
+        set({
+          recentHosts: recent,
+          hostInput: origin.replace(/^https?:\/\//, ""),
+          ...(prefix ? { scanPrefix: prefix } : {}),
+        });
       },
       setLamp: (lamp) => set({ lamp }),
       setLampStatus: (lampStatus, lampError = "") => set({ lampStatus, lampError }),
@@ -270,6 +283,7 @@ export const useBench = create<Bench>()(
           saved: saved.saved ?? [],
           backups: saved.backups ?? [],
           ledCount: fixtureCount(fixture),
+          scanPrefix: typeof saved.scanPrefix === "string" ? saved.scanPrefix : current.scanPrefix,
         };
       },
       partialize: (s) => ({
@@ -284,6 +298,7 @@ export const useBench = create<Bench>()(
         backups: s.backups,
         playlist: s.playlist,
         hostInput: s.hostInput,
+        scanPrefix: s.scanPrefix,
         recentHosts: s.recentHosts,
         user: s.user,
       }),

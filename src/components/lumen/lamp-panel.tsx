@@ -3,13 +3,15 @@ import sampleRaw from "@/data/sample-presets.json?raw";
 import { effectIsAudio, STOCK_EFFECTS, sketchKindForName } from "@/lib/wled/catalog";
 import {
   blockedMessage,
+  COMMON_SUBNETS,
+  detectLanPrefix,
   LampError,
   loadLamp,
   normalizeOrigin,
   pageIsSecure,
+  parseSubnet,
   postState,
   probeHost,
-  subnetPrefix,
 } from "@/lib/wled/client";
 import { effectPresetPayload, playlistPayload } from "@/lib/wled/playlist";
 import { oddPlaylistIds, parsePresets, type ParsedEffectPreset, type ParsedPlaylist, type PresetLibrary } from "@/lib/wled/presets";
@@ -17,6 +19,7 @@ import { useBench, type SketchStage } from "@/lib/wled/store";
 
 export function LampPanel() {
   const hostInput = useBench((s) => s.hostInput);
+  const scanPrefix = useBench((s) => s.scanPrefix);
   const recentHosts = useBench((s) => s.recentHosts);
   const user = useBench((s) => s.user);
   const password = useBench((s) => s.password);
@@ -62,12 +65,41 @@ export function LampPanel() {
     }
   }
 
+  useEffect(() => {
+    if (useBench.getState().scanPrefix) return;
+    let cancel = false;
+    void detectLanPrefix().then((prefix) => {
+      if (cancel || !prefix || useBench.getState().scanPrefix) return;
+      useBench.getState().setScanPrefix(prefix);
+      setScanNote(`This browser looks like ${prefix}.x. Press Scan, or pick another range.`);
+    });
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
+  async function resolvePrefix(): Promise<string | null> {
+    const typed = parseSubnet(scanPrefix);
+    if (typed) return typed;
+    if (scanPrefix.trim()) return null;
+    const fromLamp = parseSubnet(useBench.getState().lamp?.origin ?? "");
+    if (fromLamp) return fromLamp;
+    const fromHost = parseSubnet(hostInput);
+    if (fromHost) return fromHost;
+    return detectLanPrefix();
+  }
+
   async function scan() {
-    const prefix = subnetPrefix(hostInput) ?? subnetPrefix("http://192.168.1.20");
+    const prefix = await resolvePrefix();
     if (!prefix) {
-      setScanNote("Type an address on your network first, so the scan knows the subnet.");
+      setScanNote(
+        scanPrefix.trim()
+          ? "Use three numbers, like 192.168.178."
+          : "Pick a subnet, such as 192.168.0 or 192.168.178. This browser did not share its network address, so nothing is assumed.",
+      );
       return;
     }
+    useBench.getState().setScanPrefix(prefix);
     if (pageIsSecure() && !allowScan) {
       setScanNote(blockedMessage());
       return;
@@ -75,7 +107,7 @@ export function LampPanel() {
     setScanning(true);
     scanStop.current = false;
     setFound([]);
-    setScanNote(`Looking across ${prefix}.0`);
+    setScanNote(`Looking across ${prefix}.1–254`);
     const hosts = Array.from({ length: 254 }, (_, i) => `${prefix}.${i + 1}`);
     const hits: { origin: string; name: string }[] = [];
     let cursor = 0;
@@ -207,8 +239,54 @@ export function LampPanel() {
       ) : null}
 
       <div className="panel grid gap-2">
-        <p className="text-sm font-medium">Search the subnet</p>
-        <p className="text-sm text-muted">Knocks on every address near the one you typed. Stop any time. From an https page this often fails outright.</p>
+        <p className="text-sm font-medium">Search a subnet</p>
+        <p className="text-sm text-muted">
+          Choose the range yourself, or use this network when the browser will say which one it is. Connecting a lamp also fills the range from that lamp’s address.
+        </p>
+        <label className="block text-sm">
+          <span className="field-label">
+            <span>Subnet</span>
+          </span>
+          <input
+            className="field"
+            value={scanPrefix}
+            spellCheck={false}
+            autoCapitalize="none"
+            inputMode="decimal"
+            aria-label="Subnet"
+            placeholder="192.168.178"
+            onChange={(e) => useBench.getState().setScanPrefix(e.target.value)}
+          />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {COMMON_SUBNETS.map((prefix) => (
+            <button
+              key={prefix}
+              type="button"
+              className={`btn ${scanPrefix === prefix ? "btn-primary" : ""}`}
+              onClick={() => useBench.getState().setScanPrefix(prefix)}
+            >
+              {prefix}.x
+            </button>
+          ))}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void (async () => {
+                const detected = (await detectLanPrefix()) ?? parseSubnet(lamp?.origin ?? "") ?? parseSubnet(hostInput);
+                if (!detected) {
+                  setScanNote("This browser hid its network address. Pick a range above, or type the first three numbers.");
+                  return;
+                }
+                useBench.getState().setScanPrefix(detected);
+                setScanNote(`Using ${detected}.x.`);
+              })();
+            }}
+          >
+            This network
+          </button>
+        </div>
         {pageIsSecure() ? (
           <label className="flex min-h-11 items-center gap-2 text-sm">
             <input type="checkbox" checked={allowScan} onChange={(e) => setAllowScan(e.target.checked)} />
@@ -217,7 +295,7 @@ export function LampPanel() {
         ) : null}
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn" disabled={scanning} onClick={() => void scan()}>
-            {scanning ? "Scanning…" : "Scan"}
+            {scanning ? "Scanning…" : scanPrefix ? `Scan ${parseSubnet(scanPrefix) ?? scanPrefix}` : "Scan"}
           </button>
           {scanning ? (
             <button

@@ -149,16 +149,70 @@ export async function postState(origin: string, body: unknown, user: string, pas
 }
 
 export function subnetPrefix(originOrIp: string): string | null {
-  const origin = normalizeOrigin(originOrIp);
-  if (!origin) return null;
-  try {
-    const host = new URL(origin).hostname;
-    const parts = host.split(".");
-    if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) return parts.slice(0, 3).join(".");
-  } catch {
-    return null;
-  }
-  return null;
+  return parseSubnet(originOrIp);
+}
+
+/** First three octets of a private IPv4 address, or a prefix typed as `192.168.178`. */
+export function parseSubnet(input: string): string | null {
+  let raw = input.trim();
+  if (!raw) return null;
+  raw = raw.replace(/^https?:\/\//i, "");
+  raw = raw.split("/")[0]?.split(":")[0] ?? raw;
+  const match = raw.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\.(\d{1,3}))?$/);
+  if (!match) return null;
+  const octets = [match[1], match[2], match[3]].map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n > 255)) return null;
+  if (match[4] !== undefined && Number(match[4]) > 255) return null;
+  return octets.join(".");
+}
+
+export const COMMON_SUBNETS = ["192.168.0", "192.168.1", "192.168.2", "192.168.178", "10.0.0", "10.0.1"] as const;
+
+function isPrivateIPv4(ip: string): boolean {
+  const [a, b] = ip.split(".").map(Number);
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
+/** Best-effort LAN prefix from the browser. Many browsers hide this and return null. */
+export function detectLanPrefix(timeoutMs = 1200): Promise<string | null> {
+  if (typeof RTCPeerConnection === "undefined") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      try {
+        pc.close();
+      } catch {
+        /* already closed */
+      }
+      resolve(value);
+    };
+    const timer = window.setTimeout(() => finish(null), timeoutMs);
+    try {
+      pc.createDataChannel("lan");
+      pc.onicecandidate = (event) => {
+        const cand = event.candidate?.candidate ?? "";
+        const found = cand.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
+        if (!found) return;
+        const ip = found[1];
+        if (!ip || ip.startsWith("127.") || ip.startsWith("169.254.") || !isPrivateIPv4(ip)) return;
+        const prefix = parseSubnet(ip);
+        if (prefix) finish(prefix);
+      };
+      void pc
+        .createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .catch(() => finish(null));
+    } catch {
+      finish(null);
+    }
+  });
 }
 
 export async function probeHost(origin: string, user: string, password: string): Promise<WledInfo | null> {
